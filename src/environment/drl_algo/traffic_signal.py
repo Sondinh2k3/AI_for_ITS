@@ -56,6 +56,7 @@ class TrafficSignal:
         self,
         env,
         ts_id: str,
+        detectors: List,
         delta_time: int,
         yellow_time: int,
         min_green: int,
@@ -97,6 +98,8 @@ class TrafficSignal:
         self.reward_fn = reward_fn
         self.reward_weights = reward_weights
         self.sumo = sumo
+        self.detectors = detectors
+        self.avg_veh_length = 3.0
 
         if type(self.reward_fn) is list:
             self.reward_dim = len(self.reward_fn)
@@ -117,9 +120,15 @@ class TrafficSignal:
         self.lanes = list(
             dict.fromkeys(self.sumo.trafficlight.getControlledLanes(self.id))
         )  # Remove duplicates and keep order, nói chung là xóa các phần tử trùng lặp do đặc tính của dict
-        self.out_lanes = [link[0][1] for link in self.sumo.trafficlight.getControlledLinks(self.id) if link]
-        self.out_lanes = list(set(self.out_lanes))
-        self.lanes_length = {lane: self.sumo.lane.getLength(lane) for lane in self.lanes + self.out_lanes}
+        # self.out_lanes = [link[0][1] for link in self.sumo.trafficlight.getControlledLinks(self.id) if link]
+        # self.out_lanes = list(set(self.out_lanes))
+        # self.lanes_length = {lane: self.sumo.lane.getLength(lane) for lane in self.lanes + self.out_lanes}
+
+        self.detectors_e1 = self.detectors[0]
+        self.detectors_e2 = self.detectors[1]
+        self.detectors_e2_length = {
+            e2: self.sumo.lanearea.getLength(e2) for e2 in self.detectors_e2
+        }
 
         self.observation_space = self.observation_fn.observation_space()
         self.action_space = spaces.Box(low=np.array([0.0 for _ in range(self.num_green_phases)]), high=np.array([1.0 for _ in range(self.num_green_phases)]), dtype=np.float32)
@@ -351,7 +360,7 @@ class TrafficSignal:
         ]
         return [min(1, density) for density in lanes_density]
 
-    def get_lanes_density_by_detectors(self, detectors: List[str]) -> List[float]:
+    def get_lanes_density_by_detectors(self) -> List[float]:
         """Tính toán mật độ giao thông chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
         Args:
             detectors (List[str]): Danh sách ID của các lane area detector (E2).
@@ -361,7 +370,7 @@ class TrafficSignal:
                         0 = không có xe, 1 = mật độ tối đa (jam density)
         """
         normalized_densities = []
-        for det_id in detectors:
+        for det_id in self.detectors_e2:
             # Lấy số lượng xe trên vùng detector
             vehicle_count = self.sumo.lanearea.getLastStepVehicleNumber(det_id)
             
@@ -416,22 +425,20 @@ class TrafficSignal:
         ]
         return [min(1, queue) for queue in lanes_queue]
 
-    def get_lanes_queue_by_detectors(self, detectors: List[str]) -> List[float]:
+    def get_lanes_queue_by_detectors(self) -> List[float]:
         """Tính toán độ dài hàng đợi chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
-        Args:
-            detectors (List[str]): Danh sách ID của các lane area detector (E2).
 
         Returns:
             List[float]: Danh sách chứa độ dài hàng đợi chuẩn hóa [0,1] cho mỗi detector.
                         0 = không có xe đang dừng, 1 = hàng đợi tối đa (jam)
         """
         normalized_queues = []
-        for det_id in detectors:
-            # Lấy số lượng xe đang dừng trên vùng detector
-            halting_vehicle_count = self.sumo.lanearea.getLastStepHaltingNumber(det_id)
+        for det_id in self.detectors_e2:
+            # Lấy độ dài xe đang dừng trên vùng detector
+            queue_length_meters = self.sumo.lanearea.getJamLengthMeters(det_id)
             
             # Nếu không có xe đang dừng, hàng đợi = 0
-            if halting_vehicle_count == 0:
+            if queue_length_meters == 0:
                 normalized_queues.append(0.0)
                 continue
             
@@ -439,27 +446,9 @@ class TrafficSignal:
             detector_length_meters = self.sumo.lanearea.getLength(det_id)
 
             if detector_length_meters > 0:
-                # Lấy danh sách xe trên detector để tính chiều dài trung bình
-                vehicle_ids = self.sumo.lanearea.getLastStepVehicleIDs(det_id)
-                
-                try:
-                    if len(vehicle_ids) > 0:
-                        # Tính chiều dài trung bình của xe hiện có trên detector
-                        total_length = sum(self.sumo.vehicle.getLength(veh_id) for veh_id in vehicle_ids)
-                        avg_vehicle_length = total_length / len(vehicle_ids)
-                    else:
-                        # Sử dụng chiều dài xe mặc định 5.0m khi không có xe
-                        avg_vehicle_length = 5.0
-                except Exception:
-                    # Fallback nếu có lỗi khi lấy chiều dài xe
-                    avg_vehicle_length = 5.0
-                
-                # Tính sức chứa tối đa của detector
-                vehicle_space = self.MIN_GAP + avg_vehicle_length
-                max_vehicle_capacity = detector_length_meters / vehicle_space
                 
                 # Tính hàng đợi chuẩn hóa
-                normalized_queue = halting_vehicle_count / max_vehicle_capacity
+                normalized_queue = queue_length_meters / detector_length_meters
                 # Đảm bảo giá trị trong khoảng [0,1]
                 normalized_queue = min(1.0, normalized_queue)
                     
@@ -484,7 +473,7 @@ class TrafficSignal:
             lanes_occupancy.append(min(1.0, occupancy))
         return lanes_occupancy
 
-    def get_lanes_occupancy_by_detectors(self, detectors: List[str]) -> List[float]:
+    def get_lanes_occupancy_by_detectors(self) -> List[float]:
         """Tính toán độ chiếm dụng chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
         
         Args:
@@ -495,7 +484,7 @@ class TrafficSignal:
                         0 = không có xe chiếm dụng, 1 = chiếm dụng hoàn toàn
         """
         detectors_occupancy = []
-        for det_id in detectors:
+        for det_id in self.detectors_e2:
             try:
                 # Sử dụng API có sẵn của SUMO để lấy occupancy trực tiếp
                 occupancy = self.sumo.lanearea.getLastStepOccupancy(det_id)
@@ -535,7 +524,7 @@ class TrafficSignal:
             lanes_average_speed.append(min(1.0, avg_speed))
         return lanes_average_speed
 
-    def get_lanes_average_speed_by_detectors(self, detectors: List[str]) -> List[float]:
+    def get_lanes_average_speed_by_detectors(self) -> List[float]:
         """Tính toán tốc độ trung bình chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
         
         Args:
@@ -548,7 +537,7 @@ class TrafficSignal:
         Obs: Sử dụng API getLastStepMeanSpeed của SUMO để lấy tốc độ trung bình trực tiếp.
         """
         detectors_average_speed = []
-        for det_id in detectors:
+        for det_id in self.detectors_e2:
             try:
                 # Lấy tốc độ trung bình từ API có sẵn (m/s)
                 mean_speed = self.sumo.lanearea.getLastStepMeanSpeed(det_id)
