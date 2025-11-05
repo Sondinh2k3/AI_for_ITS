@@ -19,6 +19,7 @@ import traci
 from gymnasium.utils import EzPickle, seeding
 from pettingzoo import AECEnv
 from pettingzoo.utils import wrappers
+from ...sim.Sumo_sim import SumoSim
 
 
 try:
@@ -130,10 +131,7 @@ class SumoEnvironment(gym.Env):
         self._net = net_file
         self._route = route_file
         self.use_gui = use_gui
-        if self.use_gui or self.render_mode is not None:
-            self._sumo_binary = sumolib.checkBinary("sumo-gui")
-        else:
-            self._sumo_binary = sumolib.checkBinary("sumo")
+        # _sumo_binary không cần thiết nữa vì SumoSim xử lý
 
         assert delta_time > yellow_time, "Time between actions must be at least greater than yellow time."
         assert max_green > min_green, "Max green time must be greater than min green time."
@@ -160,13 +158,25 @@ class SumoEnvironment(gym.Env):
         self.label = str(SumoEnvironment.CONNECTION_LABEL)
         SumoEnvironment.CONNECTION_LABEL += 1
         self.sumo = None
-
-        if LIBSUMO:
-            traci.start([sumolib.checkBinary("sumo"), "-n", self._net])  # Start only to retrieve traffic light information
-            conn = traci
-        else:
-            traci.start([sumolib.checkBinary("sumo"), "-n", self._net], label="init_connection" + self.label)
-            conn = traci.getConnection("init_connection" + self.label)
+        
+        # Create SumoSim runner
+        self.sumo_sim = SumoSim(
+            net_file=self._net,
+            route_file=None,  # Only load net for now
+            label=self.label,
+            use_gui=self.use_gui,
+            virtual_display=self.virtual_display,
+            begin_time=self.begin_time,
+            sumo_seed=str(self.sumo_seed) if self.sumo_seed != "random" else "random",
+            additional_sumo_cmd=self.additional_sumo_cmd.split() if self.additional_sumo_cmd else [],
+            no_warnings=not self.sumo_warnings,
+            max_depart_delay=self.max_depart_delay,
+            waiting_time_memory=self.waiting_time_memory,
+            time_to_teleport=self.time_to_teleport,
+        )
+        
+        # Start temp connection to read metadata
+        conn = self.sumo_sim.start_temp()
 
         if ts_ids is None:
             self.ts_ids = list(conn.trafficlight.getIDList())
@@ -176,7 +186,13 @@ class SumoEnvironment(gym.Env):
 
         self._build_traffic_signals(conn)
 
-        conn.close()
+        # Close temp connection
+        try:
+            if not LIBSUMO:
+                traci.switch(self.label)
+            traci.close()
+        except Exception:
+            pass
 
         self.vehicles = dict()
         self.reward_range = (-float("inf"), float("inf"))
@@ -208,51 +224,18 @@ class SumoEnvironment(gym.Env):
         }
 
     def _start_simulation(self):
-        sumo_cmd = [
-            self._sumo_binary,
-            "-n",
-            self._net,
-            "-r",
-            self._route,
-            "--max-depart-delay",
-            str(self.max_depart_delay),
-            "--waiting-time-memory",
-            str(self.waiting_time_memory),
-            "--time-to-teleport",
-            str(self.time_to_teleport),
-        ]
-        if self.begin_time > 0:
-            sumo_cmd.append(f"-b {self.begin_time}")
-        if self.sumo_seed == "random":
-            sumo_cmd.append("--random")
-        else:
-            sumo_cmd.extend(["--seed", str(self.sumo_seed)])
-        if not self.sumo_warnings:
-            sumo_cmd.append("--no-warnings")
-        if self.additional_sumo_cmd is not None:
-            sumo_cmd.extend(self.additional_sumo_cmd.split())
+        """Start the SUMO simulation via SumoSim runner."""
+        # Update route file for full simulation
+        self.sumo_sim.route_file = self._route
+        
+        # Start full simulation
+        self.sumo = self.sumo_sim.start()
+        
+        # Setup GUI display if needed (already done in runner, but can add extra logic here)
         if self.use_gui or self.render_mode is not None:
-            sumo_cmd.extend(["--start", "--quit-on-end"])
-            if self.render_mode == "rgb_array":
-                sumo_cmd.extend(["--window-size", f"{self.virtual_display[0]},{self.virtual_display[1]}"])
-                from pyvirtualdisplay.smartdisplay import SmartDisplay
-
-                print("Creating a virtual display.")
-                self.disp = SmartDisplay(size=self.virtual_display)
-                self.disp.start()
-                print("Virtual display started.")
-
-        if LIBSUMO:
-            traci.start(sumo_cmd)
-            self.sumo = traci
-        else:
-            traci.start(sumo_cmd, label=self.label)
-            self.sumo = traci.getConnection(self.label)
-
-        if self.use_gui or self.render_mode is not None:
-            if "DEFAULT_VIEW" not in dir(traci.gui):  # traci.gui.DEFAULT_VIEW is not defined in libsumo
-                traci.gui.DEFAULT_VIEW = "View #0"
-            self.sumo.gui.setSchema(traci.gui.DEFAULT_VIEW, "real world")
+            if self.render_mode == "rgb_array" and self.virtual_display:
+                # Virtual display already started in runner
+                pass
 
     # Đặt lại môi trường về trạng thái ban đầu khi bắt đầu một episode mới.
     def reset(self, seed: Optional[int] = None, **kwargs):
@@ -417,7 +400,8 @@ class SumoEnvironment(gym.Env):
         return self.traffic_signals[ts_id].action_space
 
     def _sumo_step(self):
-        self.sumo.simulationStep()
+        """Advance SUMO simulation by one step via SumoSim runner."""
+        self.sumo_sim.step()
         self.num_arrived_vehicles += self.sumo.simulation.getArrivedNumber()
         self.num_departed_vehicles += self.sumo.simulation.getDepartedNumber()
         self.num_teleported_vehicles += self.sumo.simulation.getEndingTeleportNumber()
@@ -462,17 +446,9 @@ class SumoEnvironment(gym.Env):
 
     def close(self):
         """Close the environment and stop the SUMO simulation."""
-        if self.sumo is None:
-            return
-
-        if not LIBSUMO:
-            traci.switch(self.label)
-        traci.close()
-
-        if self.disp is not None:
-            self.disp.stop()
-            self.disp = None
-
+        if self.sumo_sim is not None:
+            self.sumo_sim.close()
+        
         self.sumo = None
 
     def __del__(self):
