@@ -99,7 +99,7 @@ Dưới đây là giải thích về cấu trúc thư mục của dự án:
 ├── network/            #  Chứa các file định nghĩa mạng lưới giao thông (.sumocfg, .net.xml, .json...).
 ├── src/                #  Mã nguồn chính của dự án.
 │   ├── algorithms/     #  Nơi chứa mã nguồn lõi của các thuật toán (DQN, PPO, MADDPG...).
-│   ├── envs/           #  Định nghĩa các môi trường RL (Gym/PettingZoo) làm cầu nối với SUMO/CityFlow.
+│   ├── environment/    #  Định nghĩa các môi trường RL (Gym/PettingZoo) làm cầu nối với SUMO/CityFlow.
 │   ├── config/         #  Các file cấu hình (.yaml, .json) cho các lượt huấn luyện, thuật toán.
 │   └── utils/          #  Các hàm tiện ích, mã tái sử dụng (ví dụ: xử lý log, định dạng dữ liệu).
 ├── tools/              #  Các script/công cụ độc lập (ví dụ: tạo mạng lưới, phân tích dữ liệu thô).
