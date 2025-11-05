@@ -421,6 +421,10 @@ class SumoEnvironment(gym.Env):
         self.num_arrived_vehicles += self.sumo.simulation.getArrivedNumber()
         self.num_departed_vehicles += self.sumo.simulation.getDepartedNumber()
         self.num_teleported_vehicles += self.sumo.simulation.getEndingTeleportNumber()
+        
+        # Cập nhật lịch sử dữ liệu từ detectors cho mỗi traffic signal
+        for ts in self.ts_ids:
+            self.traffic_signals[ts].update_detectors_history()
 
     def _get_system_info(self):
         vehicles = self.sumo.vehicle.getIDList()

@@ -100,6 +100,13 @@ class TrafficSignal:
         self.sumo = sumo
         self.detectors = detectors
         self.avg_veh_length = 3.0
+        self.sampling_interval_s = 10
+        self.aggregation_interval_s = delta_time
+
+        # Calculate total green and yellow time in a cycle
+        # Note: this only applies with fixed cycle time
+        self.total_yellow_time = self.yellow_time * self.num_green_phases
+        self.total_green_time = self.delta_time - self.total_yellow_time
 
         if type(self.reward_fn) is list:
             self.reward_dim = len(self.reward_fn)
@@ -131,8 +138,17 @@ class TrafficSignal:
         }
 
         self.observation_space = self.observation_fn.observation_space()
-        self.action_space = spaces.Box(low=np.array([0.0 for _ in range(self.num_green_phases)]), high=np.array([1.0 for _ in range(self.num_green_phases)]), dtype=np.float32)
-
+        self.action_space = spaces.Box(low=np.array([(self.min_green / self.total_green_time) for _ in range(self.num_green_phases)]), high=np.array([1.0 for _ in range(self.num_green_phases)]), dtype=np.float32)
+        assert (self.min_green * self.num_green_phases) <= self.total_green_time, (
+            "Minimum green time too high for traffic signal " + self.id + "cycle time"
+        )
+        self.detector_history = {
+            "density": {det_id: [] for det_id in self.detectors_e2},
+            "queue": {det_id: [] for det_id in self.detectors_e2},
+            "occupancy": {det_id: [] for det_id in self.detectors_e2},
+            "average_speed": {det_id: [] for det_id in self.detectors_e2},
+        }
+        
     def _get_reward_fn_from_string(self, reward_fn):
         if type(reward_fn) is str:
             if reward_fn in TrafficSignal.reward_fns.keys():
@@ -142,39 +158,31 @@ class TrafficSignal:
         return reward_fn
 
     def _build_phases(self):
-        phases = self.sumo.trafficlight.getAllProgramLogics(self.id)[0].phases
+        """
+            Builds the traffic signal phases and sets the initial program logic.
+            If in adaptive mode, rebuild logic phases with given traffic signal parameters:
+            - min_green: Minimum green time for each green phase
+            - yellow_time: Yellow time for each yellow phase
+            - delta_time: Total time for each cycle (green + yellow)
+        """
+        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
+        phases = logic.phases
+
+        # Number of green phases == number of phases (green+yellow) divided by 2
+        self.num_green_phases = len(phases) // 2
         if self.env.fixed_ts:
-            self.num_green_phases = len(phases) // 2  # Number of green phases == number of phases (green+yellow) divided by 2
             return
-
-        self.green_phases = []
-        self.yellow_dict = {}
-        for phase in phases:
-            state = phase.state
-            if "y" not in state and (state.count("r") + state.count("s") != len(state)):
-                self.green_phases.append(self.sumo.trafficlight.Phase(60, state))
-        self.num_green_phases = len(self.green_phases)
-        self.all_phases = self.green_phases.copy()
-
-        for i, p1 in enumerate(self.green_phases):
-            for j, p2 in enumerate(self.green_phases):
-                if i == j:
-                    continue
-                yellow_state = ""
-                for s in range(len(p1.state)):
-                    if (p1.state[s] == "G" or p1.state[s] == "g") and (p2.state[s] == "r" or p2.state[s] == "s"):
-                        yellow_state += "y"
-                    else:
-                        yellow_state += p1.state[s]
-                self.yellow_dict[(i, j)] = len(self.all_phases)
-                self.all_phases.append(self.sumo.trafficlight.Phase(self.yellow_time, yellow_state))
-
-        programs = self.sumo.trafficlight.getAllProgramLogics(self.id)
-        logic = programs[0]
+        
         logic.type = 0
+        for i in range(self.num_green_phases):
+            if i % 2 == 0:
+                # Initially, green time of each green phase is equally divided
+                logic.phases[i].duration = self.total_green_time / self.num_green_phases
+            else:
+                logic.phases[i].duration = self.yellow_time
         logic.phases = self.all_phases
         self.sumo.trafficlight.setProgramLogic(self.id, logic)
-        self.sumo.trafficlight.setRedYellowGreenState(self.id, self.all_phases[0].state)
+        self.sumo.trafficlight.setPhase(self.id, 0)
 
     @property
     def time_to_act(self):
@@ -185,65 +193,161 @@ class TrafficSignal:
         """Updates the traffic signal state. (No-op since SUMO handles the cycle)."""
         pass
 
-    def set_next_phase(self, action: np.ndarray):
+    def update_detectors_history(self):
         """
-        Sets the phase durations for the next cycle based on the action vector.
-        Args:
-            action (np.ndarray): A vector of values representing the desired green time proportions for each phase.
-        """
-        # Normalize the action vector to get probabilities
-        action = np.abs(action)
-        if np.sum(action) == 0:
-            action = np.ones(self.num_green_phases)
-        action /= np.sum(action)
-
-        # Calculate total green time available in the cycle
-        total_yellow_time = self.yellow_time * self.num_green_phases
-        total_green_time = self.delta_time - total_yellow_time
-
-        if total_green_time < self.num_green_phases * self.min_green:
-            green_times = [self.min_green] * self.num_green_phases
-            self.next_action_time = self.env.sim_step + sum(green_times) + total_yellow_time
-        else:
-            green_times = action * total_green_time
-            
-            under_min_indices = np.where(green_times < self.min_green)[0]
-            over_min_indices = np.where(green_times >= self.min_green)[0]
-
-            if len(under_min_indices) > 0:
-                time_needed = np.sum(self.min_green - green_times[under_min_indices])
-                time_available = np.sum(green_times[over_min_indices] - self.min_green)
-                
-                if time_available > 0:
-                    reduction_factor = time_needed / time_available
-                    if reduction_factor > 1: reduction_factor = 1
-                    
-                    green_times[under_min_indices] = self.min_green
-                    green_times[over_min_indices] -= (green_times[over_min_indices] - self.min_green) * reduction_factor
-            
-            self.next_action_time = self.env.sim_step + self.delta_time
-
-        new_logic_phases = []
-        for i in range(self.num_green_phases):
-            green_duration = int(round(green_times[i]))
-            if green_duration > 0:
-                new_logic_phases.append(self.sumo.trafficlight.Phase(duration=green_duration, state=self.green_phases[i].state))
-                
-                next_phase_idx = (i + 1) % self.num_green_phases
-                yellow_key = (i, next_phase_idx)
-                
-                if yellow_key in self.yellow_dict:
-                    yellow_phase_definition = self.all_phases[self.yellow_dict[yellow_key]]
-                    new_logic_phases.append(self.sumo.trafficlight.Phase(duration=self.yellow_time, state=yellow_phase_definition.state))
-
-        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
-        logic.phases = new_logic_phases
-        logic.type = 0
-        self.sumo.trafficlight.setProgramLogic(self.id, logic)
+        Cập nhật lịch sử dữ liệu từ các detector mỗi sampling_interval_s (10s).
         
-        self.green_phase = 0
-        self.time_since_last_phase_change = 0
-        self.is_yellow = False
+        Luồng hoạt động:
+        1. Mỗi 10s, thu thập một mẫu dữ liệu (density, queue, occupancy, speed) từ tất cả detectors
+        2. Lưu mẫu vào lịch sử cho từng loại dữ liệu
+        3. Giữ lại tối đa max_samples mẫu trong cửa sổ delta_time gần nhất
+        4. Khi agent quan sát, các hàm getter sẽ trả về trung bình của các mẫu trong cửa sổ
+        """
+        current_time = self.env.sim_step
+        
+        # Kiểm tra xem có cần cập nhật lịch sử không (mỗi sampling_interval_s = 10s)
+        # Để tránh cập nhật lại cùng một bước thời gian, kiểm tra nếu đã cách ít nhất 10s từ lần cuối
+        if not hasattr(self, '_last_sampling_time'):
+            self._last_sampling_time = -self.sampling_interval_s
+        
+        if current_time - self._last_sampling_time >= self.sampling_interval_s - 0.1:
+            self._last_sampling_time = current_time
+            
+            # Số lượng mẫu tối đa để giữ trong cửa sổ delta_time
+            max_samples = max(1, int(self.aggregation_interval_s / self.sampling_interval_s))
+            
+            for det_id in self.detectors_e2:
+                # --- THU THẬP DENSITY ---
+                density = self._compute_detector_density(det_id)
+                self.detector_history["density"][det_id].append(density)
+                if len(self.detector_history["density"][det_id]) > max_samples:
+                    self.detector_history["density"][det_id] = self.detector_history["density"][det_id][-max_samples:]
+                
+                # --- THU THẬP QUEUE ---
+                queue = self._compute_detector_queue(det_id)
+                self.detector_history["queue"][det_id].append(queue)
+                if len(self.detector_history["queue"][det_id]) > max_samples:
+                    self.detector_history["queue"][det_id] = self.detector_history["queue"][det_id][-max_samples:]
+                
+                # --- THU THẬP OCCUPANCY ---
+                occupancy = self._compute_detector_occupancy(det_id)
+                self.detector_history["occupancy"][det_id].append(occupancy)
+                if len(self.detector_history["occupancy"][det_id]) > max_samples:
+                    self.detector_history["occupancy"][det_id] = self.detector_history["occupancy"][det_id][-max_samples:]
+                
+                # --- THU THẬP AVERAGE SPEED ---
+                avg_speed = self._compute_detector_average_speed(det_id)
+                self.detector_history["average_speed"][det_id].append(avg_speed)
+                if len(self.detector_history["average_speed"][det_id]) > max_samples:
+                    self.detector_history["average_speed"][det_id] = self.detector_history["average_speed"][det_id][-max_samples:]
+    
+    def _compute_detector_density(self, det_id: str) -> float:
+        """Tính mật độ giao thông chuẩn hóa [0,1] cho một detector."""
+        try:
+            vehicle_count = self.sumo.lanearea.getLastIntervalVehicleNumber(det_id)
+            
+            if vehicle_count == 0:
+                return 0.0
+            
+            detector_length_meters = self.sumo.lanearea.getLength(det_id)
+            if detector_length_meters <= 0:
+                return 0.0
+            
+            vehicle_ids = self.sumo.lanearea.getLastIntervalVehicleIDs(det_id)
+            
+            if len(vehicle_ids) > 0:
+                total_length = sum(self.sumo.vehicle.getLength(veh_id) for veh_id in vehicle_ids)
+                avg_vehicle_length = total_length / len(vehicle_ids)
+            else:
+                avg_vehicle_length = 5.0
+            
+            max_vehicle_capacity = detector_length_meters / (self.MIN_GAP + avg_vehicle_length)
+            density = vehicle_count / max_vehicle_capacity
+            
+            return min(1.0, density)
+        except Exception:
+            return 0.0
+    
+    def _compute_detector_queue(self, det_id: str) -> float:
+        """Tính độ dài hàng đợi chuẩn hóa [0,1] cho một detector."""
+        try:
+            queue_length_meters = self.sumo.lanearea.getJamLengthMeters(det_id)
+            
+            if queue_length_meters == 0:
+                return 0.0
+            
+            detector_length_meters = self.sumo.lanearea.getLength(det_id)
+            if detector_length_meters <= 0:
+                return 0.0
+            
+            normalized_queue = queue_length_meters / detector_length_meters
+            return min(1.0, normalized_queue)
+        except Exception:
+            return 0.0
+    
+    def _compute_detector_occupancy(self, det_id: str) -> float:
+        """Tính độ chiếm dụng chuẩn hóa [0,1] cho một detector."""
+        try:
+            occupancy = self.sumo.lanearea.getLastIntervalOccupancy(det_id)
+            normalized_occupancy = occupancy / 100.0
+            return min(1.0, max(0.0, normalized_occupancy))
+        except Exception:
+            return 0.0
+    
+    def _compute_detector_average_speed(self, det_id: str) -> float:
+        """Tính tốc độ trung bình chuẩn hóa [0,1] cho một detector."""
+        try:
+            mean_speed = self.sumo.lanearea.getLastIntervalMeanSpeed(det_id)
+            
+            if mean_speed <= 0:
+                return 0.0
+            
+            lane_id = self.sumo.lanearea.getLaneID(det_id)
+            max_speed = self.sumo.lane.getMaxSpeed(lane_id)
+            
+            if max_speed > 0:
+                normalized_speed = mean_speed / max_speed
+                return min(1.0, normalized_speed)
+            else:
+                return 1.0
+        except Exception:
+            return 1.0
+
+    def set_next_cycle(self, new_phase: int):
+        """Sets what will be the next green phase and sets yellow phase if the next phase is different than the current.
+
+        Args:
+            new_phase (int): Number between [0 ... num_green_phases]
+        """
+        # new_phase = int(new_phase)
+        self.green_times = self._get_green_time_from_ratio(new_phase)
+
+        # Set the new green times for each green phase
+        # Green phases are at even indices in all_phases
+        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
+        for i in range(self.num_green_phases):
+            logic.phases[2 * i].duration = self.green_times[i]
+        
+        # Set the new logic cycle for the traffic light
+        self.sumo.trafficlight.setProgramLogic(self.id, logic)
+
+        # Set the next action time
+        self.next_action_time = self.env.sim_step + self.delta_time
+
+    def _get_green_time_from_ratio(self, green_time_set: np.ndarray):
+        """
+        Computes the green time for each phase based on the provided green time rates.
+        Args:
+            green_time_set (np.ndarray): An array of green time rates for each phase.
+        Returns:
+            List[int]: A list of green times for each phase.
+        """
+        if np.sum(green_time_set) == 0:
+            green_time_set = np.ones(self.num_green_phases)
+        green_time_set /= np.sum(green_time_set)
+        green_times = green_time_set * self.total_green_time
+        
+        return green_times
 
     def compute_observation(self):
         """Computes the observation of the traffic signal."""
@@ -361,57 +465,19 @@ class TrafficSignal:
         return [min(1, density) for density in lanes_density]
 
     def get_lanes_density_by_detectors(self) -> List[float]:
-        """Tính toán mật độ giao thông chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
-        Args:
-            detectors (List[str]): Danh sách ID của các lane area detector (E2).
-
+        """Trả về mật độ trung bình trong khoảng delta_time cho mỗi detector.
+        
         Returns:
-            List[float]: Danh sách chứa mật độ chuẩn hóa [0,1] cho mỗi detector.
-                        0 = không có xe, 1 = mật độ tối đa (jam density)
+            List[float]: Danh sách chứa mật độ chuẩn hóa [0,1] trung bình cho mỗi detector.
         """
-        normalized_densities = []
+        avg_densities = []
         for det_id in self.detectors_e2:
-            # Lấy số lượng xe trên vùng detector
-            vehicle_count = self.sumo.lanearea.getLastStepVehicleNumber(det_id)
-            
-            # Nếu không có xe, mật độ = 0
-            if vehicle_count == 0:
-                normalized_densities.append(0.0)
-                continue
-            
-            # Lấy chiều dài của detector (tính bằng mét)
-            detector_length_meters = self.sumo.lanearea.getLength(det_id)
-
-            if detector_length_meters > 0:
-                # Lấy danh sách xe trên detector để tính chiều dài trung bình
-                vehicle_ids = self.sumo.lanearea.getLastStepVehicleIDs(det_id)
-                
-                try:
-                    if len(vehicle_ids) > 0:
-                        # Tính chiều dài trung bình của xe hiện có trên detector
-                        total_length = sum(self.sumo.vehicle.getLength(veh_id) for veh_id in vehicle_ids)
-                        avg_vehicle_length = total_length / len(vehicle_ids)
-                    else:
-                        # Sử dụng chiều dài xe mặc định 5.0m khi không có xe
-                        avg_vehicle_length = 5.0
-                except Exception:
-                    # Fallback nếu có lỗi khi lấy chiều dài xe
-                    avg_vehicle_length = 5.0
-                
-                # Tính mật độ theo công thức tương tự get_lanes_density
-                # Số xe tối đa = chiều dài detector / (khoảng cách tối thiểu + chiều dài xe trung bình)
-                max_vehicle_capacity = detector_length_meters / (self.MIN_GAP + avg_vehicle_length)
-                
-                # Tính mật độ chuẩn hóa và giới hạn trong [0,1]
-                density = vehicle_count / max_vehicle_capacity
-                normalized_density = min(1.0, density)
-                    
-                normalized_densities.append(normalized_density)
+            history = self.detector_history["density"].get(det_id, [])
+            if history:
+                avg_densities.append(float(np.mean(history)))
             else:
-                # Nếu detector không có chiều dài, mật độ là 0
-                normalized_densities.append(0.0)
-
-        return normalized_densities
+                avg_densities.append(0.0)
+        return avg_densities
 
     def get_lanes_queue(self) -> List[float]:
         """Returns the queue [0,1] of the vehicles in the incoming lanes of the intersection.
@@ -426,38 +492,19 @@ class TrafficSignal:
         return [min(1, queue) for queue in lanes_queue]
 
     def get_lanes_queue_by_detectors(self) -> List[float]:
-        """Tính toán độ dài hàng đợi chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
+        """Trả về hàng đợi trung bình trong khoảng delta_time cho mỗi detector.
 
         Returns:
-            List[float]: Danh sách chứa độ dài hàng đợi chuẩn hóa [0,1] cho mỗi detector.
-                        0 = không có xe đang dừng, 1 = hàng đợi tối đa (jam)
+            List[float]: Danh sách chứa độ dài hàng đợi chuẩn hóa [0,1] trung bình cho mỗi detector.
         """
-        normalized_queues = []
+        avg_queues = []
         for det_id in self.detectors_e2:
-            # Lấy độ dài xe đang dừng trên vùng detector
-            queue_length_meters = self.sumo.lanearea.getJamLengthMeters(det_id)
-            
-            # Nếu không có xe đang dừng, hàng đợi = 0
-            if queue_length_meters == 0:
-                normalized_queues.append(0.0)
-                continue
-            
-            # Lấy chiều dài của detector (tính bằng mét)
-            detector_length_meters = self.sumo.lanearea.getLength(det_id)
-
-            if detector_length_meters > 0:
-                
-                # Tính hàng đợi chuẩn hóa
-                normalized_queue = queue_length_meters / detector_length_meters
-                # Đảm bảo giá trị trong khoảng [0,1]
-                normalized_queue = min(1.0, normalized_queue)
-                    
-                normalized_queues.append(normalized_queue)
+            history = self.detector_history["queue"].get(det_id, [])
+            if history:
+                avg_queues.append(float(np.mean(history)))
             else:
-                # Nếu detector không có chiều dài, hàng đợi là 0
-                normalized_queues.append(0.0)
-
-        return normalized_queues
+                avg_queues.append(0.0)
+        return avg_queues
 
     def get_lanes_occupancy(self) -> List[float]:
         """Returns the occupancy [0,1] of the vehicles in the incoming lanes of the intersection.
@@ -474,35 +521,19 @@ class TrafficSignal:
         return lanes_occupancy
 
     def get_lanes_occupancy_by_detectors(self) -> List[float]:
-        """Tính toán độ chiếm dụng chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
+        """Trả về độ chiếm dụng trung bình trong khoảng delta_time cho mỗi detector.
         
-        Args:
-            detectors (List[str]): Danh sách ID của các lane area detector (E2).
-
         Returns:
-            List[float]: Danh sách chứa độ chiếm dụng chuẩn hóa [0,1] cho mỗi detector.
-                        0 = không có xe chiếm dụng, 1 = chiếm dụng hoàn toàn
+            List[float]: Danh sách chứa độ chiếm dụng chuẩn hóa [0,1] trung bình cho mỗi detector.
         """
-        detectors_occupancy = []
+        avg_occupancies = []
         for det_id in self.detectors_e2:
-            try:
-                # Sử dụng API có sẵn của SUMO để lấy occupancy trực tiếp
-                occupancy = self.sumo.lanearea.getLastStepOccupancy(det_id)
-                
-                # API này trả về giá trị từ 0 đến 100 (phần trăm)
-                # Chuẩn hóa về [0,1]
-                normalized_occupancy = occupancy / 100.0
-                
-                # Đảm bảo giá trị trong khoảng [0,1]
-                normalized_occupancy = min(1.0, max(0.0, normalized_occupancy))
-                
-                detectors_occupancy.append(normalized_occupancy)
-            
-            except Exception:
-                # Fallback nếu có lỗi khi gọi API
-                detectors_occupancy.append(0.0)
-        
-        return detectors_occupancy
+            history = self.detector_history["occupancy"].get(det_id, [])
+            if history:
+                avg_occupancies.append(float(np.mean(history)))
+            else:
+                avg_occupancies.append(0.0)
+        return avg_occupancies
     
     def get_lanes_average_speed(self) -> List[float]:
         """Returns the average speed [0,1] of the vehicles in the incoming lanes of the intersection.
@@ -525,49 +556,19 @@ class TrafficSignal:
         return lanes_average_speed
 
     def get_lanes_average_speed_by_detectors(self) -> List[float]:
-        """Tính toán tốc độ trung bình chuẩn hóa [0,1] cho một danh sách các detector khu vực làn (E2).
+        """Trả về tốc độ trung bình trong khoảng delta_time cho mỗi detector.
         
-        Args:
-            detectors (List[str]): Danh sách ID của các lane area detector (E2).
-
         Returns:
             List[float]: Danh sách chứa tốc độ trung bình chuẩn hóa [0,1] cho mỗi detector.
-                        0 = tốc độ = 0, 1 = tốc độ = tốc độ tối đa của làn
-                        
-        Obs: Sử dụng API getLastStepMeanSpeed của SUMO để lấy tốc độ trung bình trực tiếp.
         """
-        detectors_average_speed = []
+        avg_speeds = []
         for det_id in self.detectors_e2:
-            try:
-                # Lấy tốc độ trung bình từ API có sẵn (m/s)
-                mean_speed = self.sumo.lanearea.getLastStepMeanSpeed(det_id)
-                
-                # Early return nếu tốc độ = 0
-                if mean_speed <= 0:
-                    detectors_average_speed.append(0.0)
-                    continue
-                
-                # Lấy tốc độ tối đa cho phép của làn chứa detector
-                # Cần lấy lane ID từ detector để biết speed limit
-                lane_id = self.sumo.lanearea.getLaneID(det_id)
-                max_speed = self.sumo.lane.getMaxSpeed(lane_id)
-                
-                if max_speed > 0:
-                    # Chuẩn hóa tốc độ về [0,1]
-                    normalized_speed = mean_speed / max_speed
-                    # Đảm bảo giá trị trong khoảng [0,1]
-                    normalized_speed = min(1.0, normalized_speed)
-                else:
-                    # Nếu không có giới hạn tốc độ, trả về 1.0
-                    normalized_speed = 1.0
-                    
-                detectors_average_speed.append(normalized_speed)
-            
-            except Exception:
-                # Fallback nếu có lỗi khi gọi API
-                detectors_average_speed.append(1.0)  # Giả định không có tắc nghẽn
-        
-        return detectors_average_speed
+            history = self.detector_history["average_speed"].get(det_id, [])
+            if history:
+                avg_speeds.append(float(np.mean(history)))
+            else:
+                avg_speeds.append(1.0)
+        return avg_speeds
 
     def get_total_queued(self) -> int:
         """Returns the total number of vehicles halting in the intersection."""
