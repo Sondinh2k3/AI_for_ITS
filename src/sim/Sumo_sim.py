@@ -395,7 +395,7 @@ class SumoSimulator(SimulatorAPI):
         Steps:
         1. Get list of all traffic light IDs from SUMO
         2. For each traffic light:
-           - Create TrafficSignal object
+           - Create TrafficSignal object with data_provider interface
            - Setup observation and action spaces
            - Initialize detector connections
         3. Store in self.traffic_signals dict
@@ -410,14 +410,28 @@ class SumoSimulator(SimulatorAPI):
         
         for ts_id in ts_ids:
             try:
-                # Create TrafficSignal object
+                # Get number of green phases
+                logic = conn.trafficlight.getAllProgramLogics(ts_id)[0]
+                num_green_phases = len(logic.phases) // 2
+                
+                # Get detectors for this traffic signal (placeholder - needs implementation)
+                detectors = [[], []]  # [e1_detectors, e2_detectors]
+                
+                # Create TrafficSignal object with data_provider (self)
                 ts = TrafficSignal(
-                    ts_id,
-                    sumo=conn,
+                    ts_id=ts_id,
                     delta_time=self.delta_time,
                     yellow_time=self.yellow_time,
                     min_green=self.min_green,
                     max_green=self.max_green,
+                    enforce_max_green=self.enforce_max_green,
+                    begin_time=self.begin_time,
+                    reward_fn=self.reward_fn.get(ts_id, "diff-waiting-time") if isinstance(self.reward_fn, dict) else self.reward_fn,
+                    reward_weights=self.reward_weights,
+                    data_provider=self,  # Pass self as data provider
+                    num_green_phases=num_green_phases,
+                    observation_class=self.observation_class,
+                    detectors=detectors,
                 )
                 
                 self.traffic_signals[ts_id] = ts
@@ -425,3 +439,156 @@ class SumoSimulator(SimulatorAPI):
             except Exception as e:
                 print(f"Warning: Failed to create TrafficSignal for {ts_id}: {e}")
                 continue
+
+    # =====================================================================
+    # Data Provider Interface Implementation
+    # These methods provide traffic data to TrafficSignal agents
+    # =====================================================================
+
+    def get_sim_time(self) -> float:
+        """Return current simulation time in seconds."""
+        if self.sumo is None:
+            return 0.0
+        try:
+            return float(self.sumo.simulation.getTime())
+        except Exception:
+            return 0.0
+
+    def should_act(self, ts_id: str, next_action_time: float) -> bool:
+        """Check if traffic signal should act at current time."""
+        return next_action_time == self.get_sim_time()
+
+    def set_traffic_light_phase(self, ts_id: str, green_times: List[float]):
+        """Set traffic light phase durations."""
+        try:
+            logic = self.sumo.trafficlight.getAllProgramLogics(ts_id)[0]
+            num_phases = len(green_times)
+            for i in range(num_phases):
+                logic.phases[2 * i].duration = green_times[i]
+            self.sumo.trafficlight.setProgramLogic(ts_id, logic)
+        except Exception as e:
+            print(f"Warning: Failed to set traffic light phase for {ts_id}: {e}")
+
+    def get_controlled_lanes(self, ts_id: str) -> List[str]:
+        """Get list of lanes controlled by traffic signal."""
+        try:
+            return list(dict.fromkeys(self.sumo.trafficlight.getControlledLanes(ts_id)))
+        except Exception:
+            return []
+
+    # Detector methods
+    def get_detector_length(self, detector_id: str) -> float:
+        """Get detector length in meters."""
+        try:
+            return self.sumo.lanearea.getLength(detector_id)
+        except Exception:
+            return 0.0
+
+    def get_detector_vehicle_count(self, detector_id: str) -> int:
+        """Get number of vehicles in detector."""
+        try:
+            return self.sumo.lanearea.getLastIntervalVehicleNumber(detector_id)
+        except Exception:
+            return 0
+
+    def get_detector_vehicle_ids(self, detector_id: str) -> List[str]:
+        """Get IDs of vehicles in detector."""
+        try:
+            return self.sumo.lanearea.getLastIntervalVehicleIDs(detector_id)
+        except Exception:
+            return []
+
+    def get_detector_jam_length(self, detector_id: str) -> float:
+        """Get jam length in detector (meters)."""
+        try:
+            return self.sumo.lanearea.getJamLengthMeters(detector_id)
+        except Exception:
+            return 0.0
+
+    def get_detector_occupancy(self, detector_id: str) -> float:
+        """Get detector occupancy percentage."""
+        try:
+            return self.sumo.lanearea.getLastIntervalOccupancy(detector_id)
+        except Exception:
+            return 0.0
+
+    def get_detector_mean_speed(self, detector_id: str) -> float:
+        """Get mean speed in detector (m/s)."""
+        try:
+            return self.sumo.lanearea.getLastIntervalMeanSpeed(detector_id)
+        except Exception:
+            return 0.0
+
+    def get_detector_lane_id(self, detector_id: str) -> str:
+        """Get lane ID associated with detector."""
+        try:
+            return self.sumo.lanearea.getLaneID(detector_id)
+        except Exception:
+            return ""
+
+    # Lane methods
+    def get_lane_vehicles(self, lane_id: str) -> List[str]:
+        """Get list of vehicle IDs in lane."""
+        try:
+            return self.sumo.lane.getLastStepVehicleIDs(lane_id)
+        except Exception:
+            return []
+
+    def get_lane_halting_number(self, lane_id: str) -> int:
+        """Get number of halting vehicles in lane."""
+        try:
+            return self.sumo.lane.getLastStepHaltingNumber(lane_id)
+        except Exception:
+            return 0
+
+    def get_lane_max_speed(self, lane_id: str) -> float:
+        """Get maximum allowed speed in lane (m/s)."""
+        try:
+            return self.sumo.lane.getMaxSpeed(lane_id)
+        except Exception:
+            return 50.0  # Default speed
+
+    # Vehicle methods
+    def get_vehicle_length(self, vehicle_id: str) -> float:
+        """Get vehicle length in meters."""
+        try:
+            return self.sumo.vehicle.getLength(vehicle_id)
+        except Exception:
+            return 5.0  # Default vehicle length
+
+    def get_vehicle_speed(self, vehicle_id: str) -> float:
+        """Get vehicle speed (m/s)."""
+        try:
+            return self.sumo.vehicle.getSpeed(vehicle_id)
+        except Exception:
+            return 0.0
+
+    def get_vehicle_allowed_speed(self, vehicle_id: str) -> float:
+        """Get vehicle's allowed speed (m/s)."""
+        try:
+            return self.sumo.vehicle.getAllowedSpeed(vehicle_id)
+        except Exception:
+            return 50.0  # Default speed
+
+    def get_vehicle_waiting_time(self, vehicle_id: str, lane_id: str) -> float:
+        """Get vehicle accumulated waiting time in lane."""
+        try:
+            # Get accumulated waiting time
+            acc = self.sumo.vehicle.getAccumulatedWaitingTime(vehicle_id)
+            
+            # Track per-lane waiting time
+            if not hasattr(self, 'vehicle_waiting_times'):
+                self.vehicle_waiting_times = {}
+            
+            veh_lane = self.sumo.vehicle.getLaneID(vehicle_id)
+            if vehicle_id not in self.vehicle_waiting_times:
+                self.vehicle_waiting_times[vehicle_id] = {veh_lane: acc}
+            else:
+                self.vehicle_waiting_times[vehicle_id][veh_lane] = acc - sum(
+                    [self.vehicle_waiting_times[vehicle_id][l] 
+                     for l in self.vehicle_waiting_times[vehicle_id].keys() if l != veh_lane]
+                )
+            
+            return self.vehicle_waiting_times[vehicle_id].get(lane_id, 0.0)
+        except Exception:
+            return 0.0

@@ -1,15 +1,11 @@
-"""This module contains the TrafficSignal class, which represents a traffic signal in the simulation."""
+"""This module contains the TrafficSignal class, which represents a traffic signal in the simulation.
 
-import os
-import sys
-from typing import Callable, List, Union
+This class is now independent of SUMO/traci - it only handles RL logic (observation, reward, action).
+All simulation-specific data is provided through a data provider interface.
+"""
 
+from typing import Callable, List, Union, Dict, Any
 
-if "SUMO_HOME" in os.environ:
-    tools = os.path.join(os.environ["SUMO_HOME"], "tools")
-    sys.path.append(tools)
-else:
-    raise ImportError("Please declare the environment variable 'SUMO_HOME'")
 import numpy as np
 from gymnasium import spaces
 
@@ -54,9 +50,7 @@ class TrafficSignal:
 
     def __init__(
         self,
-        env,
         ts_id: str,
-        detectors: List,
         delta_time: int,
         yellow_time: int,
         min_green: int,
@@ -65,12 +59,14 @@ class TrafficSignal:
         begin_time: int,
         reward_fn: Union[str, Callable, List],
         reward_weights: List[float],
-        sumo,
+        data_provider: Any,  # Interface to get traffic data (replaces direct SUMO access)
+        num_green_phases: int,
+        observation_class: type,
+        detectors: List = None,
     ):
         """Initializes a TrafficSignal object.
 
         Args:
-            env (SumoEnvironment): The environment this traffic signal belongs to.
             ts_id (str): The id of the traffic signal.
             delta_time (int): The time in seconds between actions.
             yellow_time (int): The time in seconds of the yellow phase.
@@ -80,15 +76,19 @@ class TrafficSignal:
             begin_time (int): The time in seconds when the traffic signal starts operating.
             reward_fn (Union[str, Callable]): The reward function. Can be a string with the name of the reward function or a callable function.
             reward_weights (List[float]): The weights of the reward function.
-            sumo (Sumo): The Sumo instance.
+            data_provider: Object that provides traffic data (replaces direct SUMO/traci access).
+            num_green_phases (int): Number of green phases for this traffic signal.
+            observation_class: Class for computing observations.
+            detectors (List): List of detector IDs [e1_detectors, e2_detectors].
         """
         self.id = ts_id
-        self.env = env
+        self.data_provider = data_provider  # Replaces self.sumo
         self.delta_time = delta_time
         self.yellow_time = yellow_time
         self.min_green = min_green
         self.max_green = max_green
         self.enforce_max_green = enforce_max_green
+        self.num_green_phases = num_green_phases
         self.green_phase = 0
         self.is_yellow = False
         self.time_since_last_phase_change = 0
@@ -97,14 +97,12 @@ class TrafficSignal:
         self.last_reward = None
         self.reward_fn = reward_fn
         self.reward_weights = reward_weights
-        self.sumo = sumo
-        self.detectors = detectors
+        self.detectors = detectors if detectors else [[], []]
         self.avg_veh_length = 3.0
         self.sampling_interval_s = 10
         self.aggregation_interval_s = delta_time
 
         # Calculate total green and yellow time in a cycle
-        # Note: this only applies with fixed cycle time
         self.total_yellow_time = self.yellow_time * self.num_green_phases
         self.total_green_time = self.delta_time - self.total_yellow_time
 
@@ -120,34 +118,35 @@ class TrafficSignal:
 
         self.reward_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.reward_dim,), dtype=np.float32)
 
-        self.observation_fn = self.env.observation_class(self)
+        self.observation_fn = observation_class(self)
 
-        self._build_phases()
-
-        self.lanes = list(
-            dict.fromkeys(self.sumo.trafficlight.getControlledLanes(self.id))
-        )  # Remove duplicates and keep order, nói chung là xóa các phần tử trùng lặp do đặc tính của dict
-        # self.out_lanes = [link[0][1] for link in self.sumo.trafficlight.getControlledLinks(self.id) if link]
-        # self.out_lanes = list(set(self.out_lanes))
-        # self.lanes_length = {lane: self.sumo.lane.getLength(lane) for lane in self.lanes + self.out_lanes}
-
+        # Get lanes and detectors from data provider
+        self.lanes = self.data_provider.get_controlled_lanes(self.id)
+        
         self.detectors_e1 = self.detectors[0]
         self.detectors_e2 = self.detectors[1]
         self.detectors_e2_length = {
-            e2: self.sumo.lanearea.getLength(e2) for e2 in self.detectors_e2
+            e2: self.data_provider.get_detector_length(e2) for e2 in self.detectors_e2
         }
 
         self.observation_space = self.observation_fn.observation_space()
-        self.action_space = spaces.Box(low=np.array([(self.min_green / self.total_green_time) for _ in range(self.num_green_phases)]), high=np.array([1.0 for _ in range(self.num_green_phases)]), dtype=np.float32)
-        assert (self.min_green * self.num_green_phases) <= self.total_green_time, (
-            "Minimum green time too high for traffic signal " + self.id + "cycle time"
+        self.action_space = spaces.Box(
+            low=np.array([(self.min_green / self.total_green_time) for _ in range(self.num_green_phases)]), 
+            high=np.array([1.0 for _ in range(self.num_green_phases)]), 
+            dtype=np.float32
         )
+        assert (self.min_green * self.num_green_phases) <= self.total_green_time, (
+            "Minimum green time too high for traffic signal " + self.id + " cycle time"
+        )
+        
+        # Initialize detector history
         self.detector_history = {
             "density": {det_id: [] for det_id in self.detectors_e2},
             "queue": {det_id: [] for det_id in self.detectors_e2},
             "occupancy": {det_id: [] for det_id in self.detectors_e2},
             "average_speed": {det_id: [] for det_id in self.detectors_e2},
         }
+        self._last_sampling_time = -self.sampling_interval_s
         
     def _get_reward_fn_from_string(self, reward_fn):
         if type(reward_fn) is str:
@@ -157,40 +156,13 @@ class TrafficSignal:
                 raise NotImplementedError(f"Reward function {reward_fn} not implemented")
         return reward_fn
 
-    def _build_phases(self):
-        """
-            Builds the traffic signal phases and sets the initial program logic.
-            If in adaptive mode, rebuild logic phases with given traffic signal parameters:
-            - min_green: Minimum green time for each green phase
-            - yellow_time: Yellow time for each yellow phase
-            - delta_time: Total time for each cycle (green + yellow)
-        """
-        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
-        phases = logic.phases
-
-        # Number of green phases == number of phases (green+yellow) divided by 2
-        self.num_green_phases = len(phases) // 2
-        if self.env.fixed_ts:
-            return
-        
-        logic.type = 0
-        for i in range(self.num_green_phases):
-            if i % 2 == 0:
-                # Initially, green time of each green phase is equally divided
-                logic.phases[i].duration = self.total_green_time / self.num_green_phases
-            else:
-                logic.phases[i].duration = self.yellow_time
-        logic.phases = self.all_phases
-        self.sumo.trafficlight.setProgramLogic(self.id, logic)
-        self.sumo.trafficlight.setPhase(self.id, 0)
-
     @property
     def time_to_act(self):
         """Returns True if the traffic signal should act in the current step."""
-        return self.next_action_time == self.env.sim_step
+        return self.data_provider.should_act(self.id, self.next_action_time)
 
     def update(self):
-        """Updates the traffic signal state. (No-op since SUMO handles the cycle)."""
+        """Updates the traffic signal state. (No-op since simulator handles the cycle)."""
         pass
 
     def update_detectors_history(self):
@@ -203,13 +175,9 @@ class TrafficSignal:
         3. Giữ lại tối đa max_samples mẫu trong cửa sổ delta_time gần nhất
         4. Khi agent quan sát, các hàm getter sẽ trả về trung bình của các mẫu trong cửa sổ
         """
-        current_time = self.env.sim_step
+        current_time = self.data_provider.get_sim_time()
         
         # Kiểm tra xem có cần cập nhật lịch sử không (mỗi sampling_interval_s = 10s)
-        # Để tránh cập nhật lại cùng một bước thời gian, kiểm tra nếu đã cách ít nhất 10s từ lần cuối
-        if not hasattr(self, '_last_sampling_time'):
-            self._last_sampling_time = -self.sampling_interval_s
-        
         if current_time - self._last_sampling_time >= self.sampling_interval_s - 0.1:
             self._last_sampling_time = current_time
             
@@ -244,19 +212,19 @@ class TrafficSignal:
     def _compute_detector_density(self, det_id: str) -> float:
         """Tính mật độ giao thông chuẩn hóa [0,1] cho một detector."""
         try:
-            vehicle_count = self.sumo.lanearea.getLastIntervalVehicleNumber(det_id)
+            vehicle_count = self.data_provider.get_detector_vehicle_count(det_id)
             
             if vehicle_count == 0:
                 return 0.0
             
-            detector_length_meters = self.sumo.lanearea.getLength(det_id)
+            detector_length_meters = self.data_provider.get_detector_length(det_id)
             if detector_length_meters <= 0:
                 return 0.0
             
-            vehicle_ids = self.sumo.lanearea.getLastIntervalVehicleIDs(det_id)
+            vehicle_ids = self.data_provider.get_detector_vehicle_ids(det_id)
             
             if len(vehicle_ids) > 0:
-                total_length = sum(self.sumo.vehicle.getLength(veh_id) for veh_id in vehicle_ids)
+                total_length = sum(self.data_provider.get_vehicle_length(veh_id) for veh_id in vehicle_ids)
                 avg_vehicle_length = total_length / len(vehicle_ids)
             else:
                 avg_vehicle_length = 5.0
@@ -271,12 +239,12 @@ class TrafficSignal:
     def _compute_detector_queue(self, det_id: str) -> float:
         """Tính độ dài hàng đợi chuẩn hóa [0,1] cho một detector."""
         try:
-            queue_length_meters = self.sumo.lanearea.getJamLengthMeters(det_id)
+            queue_length_meters = self.data_provider.get_detector_jam_length(det_id)
             
             if queue_length_meters == 0:
                 return 0.0
             
-            detector_length_meters = self.sumo.lanearea.getLength(det_id)
+            detector_length_meters = self.data_provider.get_detector_length(det_id)
             if detector_length_meters <= 0:
                 return 0.0
             
@@ -288,7 +256,7 @@ class TrafficSignal:
     def _compute_detector_occupancy(self, det_id: str) -> float:
         """Tính độ chiếm dụng chuẩn hóa [0,1] cho một detector."""
         try:
-            occupancy = self.sumo.lanearea.getLastIntervalOccupancy(det_id)
+            occupancy = self.data_provider.get_detector_occupancy(det_id)
             normalized_occupancy = occupancy / 100.0
             return min(1.0, max(0.0, normalized_occupancy))
         except Exception:
@@ -297,13 +265,13 @@ class TrafficSignal:
     def _compute_detector_average_speed(self, det_id: str) -> float:
         """Tính tốc độ trung bình chuẩn hóa [0,1] cho một detector."""
         try:
-            mean_speed = self.sumo.lanearea.getLastIntervalMeanSpeed(det_id)
+            mean_speed = self.data_provider.get_detector_mean_speed(det_id)
             
             if mean_speed <= 0:
                 return 0.0
             
-            lane_id = self.sumo.lanearea.getLaneID(det_id)
-            max_speed = self.sumo.lane.getMaxSpeed(lane_id)
+            lane_id = self.data_provider.get_detector_lane_id(det_id)
+            max_speed = self.data_provider.get_lane_max_speed(lane_id)
             
             if max_speed > 0:
                 normalized_speed = mean_speed / max_speed
@@ -313,26 +281,20 @@ class TrafficSignal:
         except Exception:
             return 1.0
 
-    def set_next_cycle(self, new_phase: int):
-        """Sets what will be the next green phase and sets yellow phase if the next phase is different than the current.
+    def set_next_phase(self, new_phase: int):
+        """Sets what will be the next green phase.
 
         Args:
-            new_phase (int): Number between [0 ... num_green_phases]
+            new_phase (int): Action representing green time ratios for each phase.
         """
-        # new_phase = int(new_phase)
         self.green_times = self._get_green_time_from_ratio(new_phase)
 
-        # Set the new green times for each green phase
-        # Green phases are at even indices in all_phases
-        logic = self.sumo.trafficlight.getAllProgramLogics(self.id)[0]
-        for i in range(self.num_green_phases):
-            logic.phases[2 * i].duration = self.green_times[i]
-        
-        # Set the new logic cycle for the traffic light
-        self.sumo.trafficlight.setProgramLogic(self.id, logic)
+        # Delegate phase setting to data provider (simulator)
+        self.data_provider.set_traffic_light_phase(self.id, self.green_times)
 
         # Set the next action time
-        self.next_action_time = self.env.sim_step + self.delta_time
+        current_time = self.data_provider.get_sim_time()
+        self.next_action_time = current_time + self.delta_time
 
     def _get_green_time_from_ratio(self, green_time_set: np.ndarray):
         """
@@ -409,18 +371,10 @@ class TrafficSignal:
         """
         wait_time_per_lane = []
         for lane in self.lanes:
-            veh_list = self.sumo.lane.getLastStepVehicleIDs(lane)
+            veh_list = self.data_provider.get_lane_vehicles(lane)
             wait_time = 0.0
             for veh in veh_list:
-                veh_lane = self.sumo.vehicle.getLaneID(veh)
-                acc = self.sumo.vehicle.getAccumulatedWaitingTime(veh)
-                if veh not in self.env.vehicles:
-                    self.env.vehicles[veh] = {veh_lane: acc}
-                else:
-                    self.env.vehicles[veh][veh_lane] = acc - sum(
-                        [self.env.vehicles[veh][lane] for lane in self.env.vehicles[veh].keys() if lane != veh_lane]
-                    )
-                wait_time += self.env.vehicles[veh][veh_lane]
+                wait_time += self.data_provider.get_vehicle_waiting_time(veh, lane)
             wait_time_per_lane.append(wait_time)
         return wait_time_per_lane
 
@@ -434,35 +388,28 @@ class TrafficSignal:
         if len(vehs) == 0:
             return 1.0
         for v in vehs:
-            avg_speed += self.sumo.vehicle.getSpeed(v) / self.sumo.vehicle.getAllowedSpeed(v)
+            speed = self.data_provider.get_vehicle_speed(v)
+            allowed_speed = self.data_provider.get_vehicle_allowed_speed(v)
+            avg_speed += speed / allowed_speed if allowed_speed > 0 else 0.0
         return avg_speed / len(vehs)
 
     def get_pressure(self):
         """Returns the pressure (#veh leaving - #veh approaching) of the intersection."""
-        return sum(self.sumo.lane.getLastStepVehicleNumber(lane) for lane in self.out_lanes) - sum(
-            self.sumo.lane.getLastStepVehicleNumber(lane) for lane in self.lanes
-        )
+        # This would need out_lanes from data provider
+        return 0.0  # Placeholder - needs out_lanes implementation
 
-    def get_out_lanes_density(self) -> List[float]:
-        """Returns the density of the vehicles in the outgoing lanes of the intersection."""
-        lanes_density = [
-            self.sumo.lane.getLastStepVehicleNumber(lane)
-            / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
-            for lane in self.out_lanes
-        ]
-        return [min(1, density) for density in lanes_density]
+    def get_total_queued(self) -> int:
+        """Returns the total number of vehicles halting in the intersection."""
+        total_queued = 0
+        for lane in self.lanes:
+            total_queued += self.data_provider.get_lane_halting_number(lane)
+        return total_queued
 
-    def get_lanes_density(self) -> List[float]:
-        """Returns the density [0,1] of the vehicles in the incoming lanes of the intersection.
-
-        Obs: The density is computed as the number of vehicles divided by the number of vehicles that could fit in the lane.
-        """
-        lanes_density = [
-            self.sumo.lane.getLastStepVehicleNumber(lane)
-            / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
-            for lane in self.lanes
-        ]
-        return [min(1, density) for density in lanes_density]
+    def _get_veh_list(self):
+        veh_list = []
+        for lane in self.lanes:
+            veh_list += self.data_provider.get_lane_vehicles(lane)
+        return veh_list
 
     def get_lanes_density_by_detectors(self) -> List[float]:
         """Trả về mật độ trung bình trong khoảng delta_time cho mỗi detector.
@@ -479,18 +426,6 @@ class TrafficSignal:
                 avg_densities.append(0.0)
         return avg_densities
 
-    def get_lanes_queue(self) -> List[float]:
-        """Returns the queue [0,1] of the vehicles in the incoming lanes of the intersection.
-
-        Obs: The queue is computed as the number of vehicles halting divided by the number of vehicles that could fit in the lane.
-        """
-        lanes_queue = [
-            self.sumo.lane.getLastStepHaltingNumber(lane)
-            / (self.lanes_length[lane] / (self.MIN_GAP + self.sumo.lane.getLastStepLength(lane)))
-            for lane in self.lanes
-        ]
-        return [min(1, queue) for queue in lanes_queue]
-
     def get_lanes_queue_by_detectors(self) -> List[float]:
         """Trả về hàng đợi trung bình trong khoảng delta_time cho mỗi detector.
 
@@ -505,20 +440,6 @@ class TrafficSignal:
             else:
                 avg_queues.append(0.0)
         return avg_queues
-
-    def get_lanes_occupancy(self) -> List[float]:
-        """Returns the occupancy [0,1] of the vehicles in the incoming lanes of the intersection.
-
-        Obs: The occupancy is computed as the sum of the lengths of the vehicles divided by the length of the lane.
-        """
-        lanes_occupancy = []
-        for lane in self.lanes:
-            lane_length = self.lanes_length[lane]
-            vehs = self.sumo.lane.getLastStepVehicleIDs(lane)
-            total_veh_length = sum(self.sumo.vehicle.getLength(veh) for veh in vehs)
-            occupancy = total_veh_length / lane_length if lane_length > 0 else 0.0
-            lanes_occupancy.append(min(1.0, occupancy))
-        return lanes_occupancy
 
     def get_lanes_occupancy_by_detectors(self) -> List[float]:
         """Trả về độ chiếm dụng trung bình trong khoảng delta_time cho mỗi detector.
@@ -535,26 +456,6 @@ class TrafficSignal:
                 avg_occupancies.append(0.0)
         return avg_occupancies
     
-    def get_lanes_average_speed(self) -> List[float]:
-        """Returns the average speed [0,1] of the vehicles in the incoming lanes of the intersection.
-
-        Obs: The average speed is computed as the average speed of the vehicles divided by the maximum allowed speed of the vehicles.
-        """
-        lanes_average_speed = []
-        for lane in self.lanes:
-            vehs = self.sumo.lane.getLastStepVehicleIDs(lane)
-            if len(vehs) == 0:
-                lanes_average_speed.append(1.0)
-                continue
-            total_speed = 0.0
-            for veh in vehs:
-                speed = self.sumo.vehicle.getSpeed(veh)
-                allowed_speed = self.sumo.vehicle.getAllowedSpeed(veh)
-                total_speed += speed / allowed_speed if allowed_speed > 0 else 0.0
-            avg_speed = total_speed / len(vehs)
-            lanes_average_speed.append(min(1.0, avg_speed))
-        return lanes_average_speed
-
     def get_lanes_average_speed_by_detectors(self) -> List[float]:
         """Trả về tốc độ trung bình trong khoảng delta_time cho mỗi detector.
         
@@ -569,16 +470,6 @@ class TrafficSignal:
             else:
                 avg_speeds.append(1.0)
         return avg_speeds
-
-    def get_total_queued(self) -> int:
-        """Returns the total number of vehicles halting in the intersection."""
-        return sum(self.sumo.lane.getLastStepHaltingNumber(lane) for lane in self.lanes)
-
-    def _get_veh_list(self):
-        veh_list = []
-        for lane in self.lanes:
-            veh_list += self.sumo.lane.getLastStepVehicleIDs(lane)
-        return veh_list
 
     @classmethod
     def register_reward_fn(cls, fn: Callable):

@@ -1,6 +1,6 @@
 # PPO Training - Tóm Tắt Nhanh
 
-## 📦 Các File Đã Tạo
+## 📦 Các File thuật toán PPO
 
 ```
 scripts/
@@ -13,7 +13,7 @@ scripts/
 TRAINING_GUIDE.md             ← Hướng dẫn chi tiết đầy đủ
 ```
 
-## 🚀 Bắt Đầu Ngay
+## Bắt Đầu 
 
 ### 1. Setup (Lần đầu)
 
@@ -51,7 +51,7 @@ CKPT="./results/ppo_grid4x4_.../checkpoint_000050"
 python scripts/eval_ppo.py --checkpoint $CKPT --episodes 5
 ```
 
-## 📊 Lõi Thuật toán PPO
+## Lõi Thuật toán PPO
 
 **Công thức:**
 ```
@@ -59,9 +59,9 @@ L^CLIP(θ) = E_t [ min(r_t(θ) * Â_t, clip(r_t(θ), 1-ε, 1+ε) * Â_t) ]
 ```
 
 **Ưu điểm:**
-- ✅ Ổn định, dễ tune
-- ✅ Hiệu quả sample
-- ✅ Hoạt động tốt cho traffic control
+- Ổn định, dễ tune
+- Hiệu quả sample
+- Hoạt động tốt cho traffic control
 
 **Luồng:**
 1. Rollout: Chạy environment với policy hiện tại
@@ -69,7 +69,7 @@ L^CLIP(θ) = E_t [ min(r_t(θ) * Â_t, clip(r_t(θ), 1-ε, 1+ε) * Â_t) ]
 3. Update: Multiple SGD passes trên batch
 4. Repeat: Đến converge
 
-## ⚙️ Tham Số Chính
+## Tham Số Chính
 
 | Tham số | Mặc định | Mô tả |
 |---------|----------|-------|
@@ -79,7 +79,7 @@ L^CLIP(θ) = E_t [ min(r_t(θ) * Â_t, clip(r_t(θ), 1-ε, 1+ε) * Â_t) ]
 | `gamma` | 0.99 | Discount factor |
 | `workers` | 2 | Parallel collection |
 
-## 📂 Kết Quả
+## Kết Quả
 
 ```
 results/
@@ -90,7 +90,7 @@ results/
     └── progress.csv
 ```
 
-## 🔧 Customize
+## Customize
 
 Để thay đổi tham số, sửa trong `train_ppo.py`:
 
@@ -113,7 +113,7 @@ Hoặc dùng examples từ `ppo_config_examples.py`:
 - `get_ppo_config_exploration()` - Khám phá cao
 - `get_ppo_config_stable()` - Ổn định cao
 
-## ❌ Troubleshooting
+## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
@@ -122,7 +122,7 @@ Hoặc dùng examples từ `ppo_config_examples.py`:
 | Training quá chậm | Tăng workers hoặc dùng GPU |
 | Model không học | Tăng entropy_coeff hoặc learning_rate |
 
-## 📚 Tài Liệu
+## Tài Liệu
 
 - **Chi tiết:** `TRAINING_GUIDE.md`
 - **Nhanh:** `scripts/README_PPO.md`

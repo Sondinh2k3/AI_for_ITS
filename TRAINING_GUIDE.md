@@ -2,7 +2,7 @@
 
 Hướng dẫn chi tiết về huấn luyện mô hình PPO (Proximal Policy Optimization) để điều khiển đèn giao thông thích ứng trong SUMO.
 
-## 📋 Mục Lục
+## Mục Lục
 
 1. [Cấu trúc File](#cấu-trúc-file)
 2. [Cài đặt Môi trường](#cài-đặt-môi-trường)
@@ -14,7 +14,7 @@ Hướng dẫn chi tiết về huấn luyện mô hình PPO (Proximal Policy Opt
 
 ---
 
-## 🗂️ Cấu trúc File
+## Cấu trúc File
 
 ```
 AI_for_ITS/
@@ -42,7 +42,7 @@ AI_for_ITS/
 
 ---
 
-## 🔧 Cài đặt Môi trường
+## Cài đặt Môi trường
 
 ### 1. Tạo và Kích hoạt Môi trường Ảo
 
@@ -95,7 +95,7 @@ source ~/.bashrc
 
 ---
 
-## 🚀 Huấn luyện Mô hình
+## Huấn luyện Mô hình
 
 ### Cách 1: Sử dụng Lệnh Đơn giản
 
@@ -186,7 +186,7 @@ python scripts/train_ppo.py \
 
 ---
 
-## 📊 Đánh giá Mô hình
+## Đánh giá Mô hình
 
 ### Sau Huấn luyện
 
@@ -212,7 +212,7 @@ python scripts/eval_ppo.py \
 
 ---
 
-## ⚙️ Tham số Cấu hình
+## Tham số Cấu hình
 
 ### Tham số SUMO Environment
 
@@ -258,15 +258,15 @@ def create_ppo_config(...):
 
 ---
 
-## 🧠 Cấu trúc PPO
+## Cấu trúc PPO
 
 ### Thuật toán PPO (Proximal Policy Optimization)
 
 **Ưu điểm:**
-- ✅ Ổn định hơn policy gradient methods
-- ✅ Hiệu quả sample-efficient
-- ✅ Dễ implement và debug
-- ✅ Hoạt động tốt với both discrete và continuous actions
+- Ổn định hơn policy gradient methods
+- Hiệu quả sample-efficient
+- Dễ implement và debug
+- Hoạt động tốt với both discrete và continuous actions
 
 **Công thức Update:**
 
@@ -317,7 +317,7 @@ Output: πθ    Output: V(s)
 
 ---
 
-## 📈 Kết quả Huấn luyện
+## Kết quả Huấn luyện
 
 ### Cấu trúc Thư mục Kết quả
 
@@ -371,7 +371,7 @@ Iteration 100 | Episode Reward Mean:   125.45 | Episode Len Mean:   285.2
 
 ---
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Lỗi: "SUMO_HOME not set"
 
@@ -412,7 +412,7 @@ python scripts/train_ppo.py --gpu
 
 ---
 
-## 📚 Tài liệu Tham khảo
+## Tài liệu Tham khảo
 
 - [PPO Paper](https://arxiv.org/abs/1707.06347)
 - [Ray RLlib Docs](https://docs.ray.io/en/latest/rllib/index.html)
@@ -421,7 +421,7 @@ python scripts/train_ppo.py --gpu
 
 ---
 
-## 📝 Ghi Chú
+## Ghi Chú
 
 - Script này không thay đổi code trong `src/environment/drl_algo/`
 - Mô hình được lưu dưới dạng checkpoint có thể load lại để tiếp tục training
@@ -429,6 +429,3 @@ python scripts/train_ppo.py --gpu
 - Bạn có thể chạy nhiều training song song trên các worker khác nhau
 
 ---
-
-Tác giả: AI for Traffic Signal Control  
-Ngày: 2025
