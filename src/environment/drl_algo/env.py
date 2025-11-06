@@ -12,8 +12,16 @@ from gymnasium.utils import EzPickle, seeding
 from pettingzoo import AECEnv
 from pettingzoo.utils import wrappers
 
-from ...sim.simulator_api import SimulatorAPI
-from ...sim.Sumo_sim import SumoSimulator 
+import sys
+from pathlib import Path
+
+# Add parent directories to path for imports
+_src_path = Path(__file__).parent.parent.parent
+if str(_src_path) not in sys.path:
+    sys.path.insert(0, str(_src_path))
+
+from sim.simulator_api import SimulatorAPI
+from sim.Sumo_sim import SumoSimulator 
 
 
 try:
@@ -189,20 +197,21 @@ class SumoEnvironment(gym.Env):
         self.observations = {ts: None for ts in self.ts_ids}
         self.rewards = {ts: None for ts in self.ts_ids}
 
-    def _setup_reward_functions(self):
-        """Setup reward functions for each traffic signal."""
-        if not isinstance(self.reward_fn, dict):
-            self.reward_fn = {ts: self.reward_fn for ts in self.ts_ids}
+    # def _setup_reward_functions(self):
+    #     """Setup reward functions for each traffic signal."""
+    #     if not isinstance(self.reward_fn, dict):
+    #         self.reward_fn = {ts: self.reward_fn for ts in self.ts_ids}
 
-    def _start_simulation(self):
-        """Start a new simulation episode."""
-        self.simulator.reset()  # Reset simulator to initial state
+    # def _start_simulation(self):
+    #     """Start a new simulation episode."""
+    #     self.simulator.reset()  # Reset simulator to initial state
 
     # Đặt lại môi trường về trạng thái ban đầu khi bắt đầu một episode mới.
     def reset(self, seed: Optional[int] = None, **kwargs):
         """Reset the environment."""
         super().reset(seed=seed, **kwargs)
 
+        # Lần đầu khởi tạo sẽ không cần phải đóng môi trường và lưu kết quả
         if self.episode != 0:
             self.close()
             self.save_csv(self.out_csv_name, self.episode)
@@ -246,7 +255,7 @@ class SumoEnvironment(gym.Env):
         else:
             actions = action
 
-        # No action in fixed timing mode
+        # No action in fixed timing mode => in fixed time, don't action
         if self.fixed_ts:
             actions = {}
 
@@ -261,7 +270,7 @@ class SumoEnvironment(gym.Env):
         info.update(self._compute_info())
         
         # Episode ends when sim_step >= max_steps
-        terminated = False  # no terminal states in this environment
+        terminated = False  # no terminal states in this environment - env just end when timeout or end of vehicles
         truncated = dones["__all__"]
 
         if self.single_agent:
@@ -400,9 +409,9 @@ class SumoEnvironment(gym.Env):
         if self.simulator is not None:
             self.simulator.close()
 
-    def __del__(self):
-        """Close the environment when object is deleted."""
-        self.close()
+    # def __del__(self):
+    #     """Close the environment when object is deleted."""
+    #     self.close()
 
     def render(self):
         """Render the environment.

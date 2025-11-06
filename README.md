@@ -4,7 +4,7 @@ Dự án này là một môi trường nghiên cứu và phát triển các thu�
 
 ---
 
-## 🚀 Bắt đầu nhanh (Getting Started)
+## Bắt đầu nhanh (Getting Started)
 
 ### 1. Yêu cầu hệ thống
 
@@ -66,7 +66,7 @@ Dự án này là một môi trường nghiên cứu và phát triển các thu�
 
 ---
 
-## 💻 Cách sử dụng (Usage)
+## Cách sử dụng (Usage)
 
 Các file thực thi chính nằm ở thư mục gốc của dự án.
 
