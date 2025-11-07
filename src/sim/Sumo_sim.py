@@ -285,6 +285,83 @@ class SumoSimulator(SimulatorAPI):
         """Property for current simulation step."""
         return self.get_sim_step()
 
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate counters for the current episode."""
+        return {
+            "num_arrived": self.num_arrived_vehicles,
+            "num_departed": self.num_departed_vehicles,
+            "num_teleported": self.num_teleported_vehicles,
+        }
+
+    def get_system_info(self) -> Dict[str, Any]:
+        """Return system-level information for the current state."""
+        if self.sumo is None:
+            return {}
+
+        try:
+            vehicles = list(self.sumo.vehicle.getIDList())
+            speeds = [self.sumo.vehicle.getSpeed(vehicle) for vehicle in vehicles]
+            waiting_times = [self.sumo.vehicle.getWaitingTime(vehicle) for vehicle in vehicles]
+            num_backlogged = self.sumo.simulation.getPendingVehiclesNumber()
+
+            return {
+                "system_total_running": len(vehicles),
+                "system_total_backlogged": num_backlogged,
+                "system_total_stopped": sum(int(speed < 0.1) for speed in speeds),
+                "system_total_arrived": self.num_arrived_vehicles,
+                "system_total_departed": self.num_departed_vehicles,
+                "system_total_teleported": self.num_teleported_vehicles,
+                "system_total_waiting_time": float(sum(waiting_times)),
+                "system_mean_waiting_time": float(np.mean(waiting_times)) if waiting_times else 0.0,
+                "system_mean_speed": float(np.mean(speeds)) if speeds else 0.0,
+            }
+        except Exception:
+            return {}
+
+    def get_per_agent_info(self) -> Dict[str, Any]:
+        """Return per-agent (traffic signal) information."""
+        if not self.traffic_signals or not self.ts_ids:
+            return {}
+
+        info: Dict[str, Any] = {}
+        try:
+            stopped: List[int] = []
+            accumulated_waiting: List[float] = []
+            average_speed: List[float] = []
+
+            for ts in self.ts_ids:
+                signal = self.traffic_signals.get(ts)
+                if signal is None:
+                    continue
+
+                stopped.append(signal.get_total_queued())
+                accumulated_waiting.append(sum(signal.get_accumulated_waiting_time_per_lane()))
+                average_speed.append(signal.get_average_speed())
+
+                info[f"{ts}_stopped"] = stopped[-1]
+                info[f"{ts}_accumulated_waiting_time"] = accumulated_waiting[-1]
+                info[f"{ts}_average_speed"] = average_speed[-1]
+
+            info["agents_total_stopped"] = sum(stopped)
+            info["agents_total_accumulated_waiting_time"] = float(sum(accumulated_waiting))
+        except Exception:
+            return {}
+
+        return info
+
+    def get_rgb_array(self):  # pragma: no cover - depends on GUI availability
+        """Return an RGB array representation of the current frame if available."""
+        if not self.use_gui or self.disp is None:
+            return None
+
+        try:
+            image = self.disp.grab()
+            if image is None:
+                return None
+            return np.array(image)
+        except Exception:
+            return None
+
     # =====================================================================
     # Internal SUMO Management (Private Methods)
     # =====================================================================

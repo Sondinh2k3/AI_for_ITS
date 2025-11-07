@@ -120,6 +120,11 @@ class SumoEnvironment(gym.Env):
         sumo_warnings: bool = True,
         additional_sumo_cmd: Optional[str] = None,
         render_mode: Optional[str] = None,
+        use_event_bus: bool = False,
+        event_bus=None,
+        event_bus_env_id: Optional[str] = None,
+        event_bus_simulator_id: Optional[str] = None,
+        event_bus_timeout: float = 10.0,
     ) -> None:
         """Initialize the environment."""
         assert render_mode is None or render_mode in self.metadata["render_modes"], "Invalid render mode."
@@ -156,27 +161,47 @@ class SumoEnvironment(gym.Env):
         self.label = str(SumoEnvironment.CONNECTION_LABEL)
         SumoEnvironment.CONNECTION_LABEL += 1
         self.sumo = None
+        self.use_event_bus = use_event_bus
+        self._event_bus = event_bus
+        self._event_bus_timeout = event_bus_timeout
+        self._event_bus_env_id = event_bus_env_id or f"env_{self.label}"
+        self._event_bus_simulator_id = event_bus_simulator_id
         
         # Create simulator instance
-        self.simulator = SumoSimulator(
-            net_file=self._net,
-            route_file=self._route,
-            label=self.label,
-            use_gui=self.use_gui,
-            virtual_display=self.virtual_display,
-            begin_time=self.begin_time,
-            delta_time=self.delta_time,
-            yellow_time=self.yellow_time,
-            min_green=self.min_green,
-            max_green=self.max_green,
-            enforce_max_green=self.enforce_max_green,
-            sumo_seed=str(self.sumo_seed) if self.sumo_seed != "random" else "random",
-            additional_sumo_cmd=self.additional_sumo_cmd.split() if self.additional_sumo_cmd else [],
-            sumo_warnings=self.sumo_warnings,
-            max_depart_delay=self.max_depart_delay,
-            waiting_time_memory=self.waiting_time_memory,
-            time_to_teleport=self.time_to_teleport,
-        )
+        if self.use_event_bus:
+            if self._event_bus is None:
+                raise ValueError("event_bus must be provided when use_event_bus=True")
+            if not self._event_bus_simulator_id:
+                raise ValueError("event_bus_simulator_id must be provided when use_event_bus=True")
+
+            from sim.event_bus_proxy import EventBusSimulatorProxy
+
+            self.simulator = EventBusSimulatorProxy(
+                bus=self._event_bus,
+                env_id=self._event_bus_env_id,
+                simulator_id=self._event_bus_simulator_id,
+                timeout=self._event_bus_timeout,
+            )
+        else:
+            self.simulator = SumoSimulator(
+                net_file=self._net,
+                route_file=self._route,
+                label=self.label,
+                use_gui=self.use_gui,
+                virtual_display=self.virtual_display,
+                begin_time=self.begin_time,
+                delta_time=self.delta_time,
+                yellow_time=self.yellow_time,
+                min_green=self.min_green,
+                max_green=self.max_green,
+                enforce_max_green=self.enforce_max_green,
+                sumo_seed=str(self.sumo_seed) if self.sumo_seed != "random" else "random",
+                additional_sumo_cmd=self.additional_sumo_cmd.split() if self.additional_sumo_cmd else [],
+                sumo_warnings=self.sumo_warnings,
+                max_depart_delay=self.max_depart_delay,
+                waiting_time_memory=self.waiting_time_memory,
+                time_to_teleport=self.time_to_teleport,
+            )
         
         # Initialize simulator and get initial state
         initial_state = self.simulator.initialize()
