@@ -93,8 +93,8 @@ class SumoEnvironment(gym.Env):
 
     def __init__(
         self,
-        net_file: str,
-        route_file: str,
+        net_file: Optional[str] = None,
+        route_file: Optional[str] = None,
         out_csv_name: Optional[str] = None,
         use_gui: bool = False,
         virtual_display: Tuple[int, int] = (3200, 1800),
@@ -132,6 +132,16 @@ class SumoEnvironment(gym.Env):
         self.virtual_display = virtual_display
         self.disp = None
 
+        self.use_event_bus = use_event_bus
+        if self.use_event_bus:
+            if event_bus is None:
+                raise ValueError("event_bus must be provided when use_event_bus=True")
+            if not event_bus_simulator_id:
+                raise ValueError("event_bus_simulator_id must be provided when use_event_bus=True")
+        else:
+            if net_file is None or route_file is None:
+                raise ValueError("net_file and route_file must be provided when use_event_bus=False")
+
         self._net = net_file
         self._route = route_file
         self.use_gui = use_gui
@@ -161,7 +171,8 @@ class SumoEnvironment(gym.Env):
         self.label = str(SumoEnvironment.CONNECTION_LABEL)
         SumoEnvironment.CONNECTION_LABEL += 1
         self.sumo = None
-        self.use_event_bus = use_event_bus
+        
+        # Event bus parameters
         self._event_bus = event_bus
         self._event_bus_timeout = event_bus_timeout
         self._event_bus_env_id = event_bus_env_id or f"env_{self.label}"
@@ -169,11 +180,6 @@ class SumoEnvironment(gym.Env):
         
         # Create simulator instance
         if self.use_event_bus:
-            if self._event_bus is None:
-                raise ValueError("event_bus must be provided when use_event_bus=True")
-            if not self._event_bus_simulator_id:
-                raise ValueError("event_bus_simulator_id must be provided when use_event_bus=True")
-
             from sim.event_bus_proxy import EventBusSimulatorProxy
 
             self.simulator = EventBusSimulatorProxy(
@@ -320,29 +326,29 @@ class SumoEnvironment(gym.Env):
         self.metrics.append(info.copy())
         return info
 
-    def _compute_observations(self):
-        self.observations.update(
-            {
-                ts: self.traffic_signals[ts].compute_observation()
-                for ts in self.ts_ids
-                if self.traffic_signals[ts].time_to_act or self.fixed_ts
-            }
-        )
-        return {
-            ts: self.observations[ts].copy()
-            for ts in self.observations.keys()
-            if self.traffic_signals[ts].time_to_act or self.fixed_ts
-        }
+    # def _compute_observations(self):
+    #     self.observations.update(
+    #         {
+    #             ts: self.traffic_signals[ts].compute_observation()
+    #             for ts in self.ts_ids
+    #             if self.traffic_signals[ts].time_to_act or self.fixed_ts
+    #         }
+    #     )
+    #     return {
+    #         ts: self.observations[ts].copy()
+    #         for ts in self.observations.keys()
+    #         if self.traffic_signals[ts].time_to_act or self.fixed_ts
+    #     }
 
-    def _compute_rewards(self):
-        self.rewards.update(
-            {
-                ts: self.traffic_signals[ts].compute_reward()
-                for ts in self.ts_ids
-                if self.traffic_signals[ts].time_to_act or self.fixed_ts
-            }
-        )
-        return {ts: self.rewards[ts] for ts in self.rewards.keys() if self.traffic_signals[ts].time_to_act or self.fixed_ts}
+    # def _compute_rewards(self):
+    #     self.rewards.update(
+    #         {
+    #             ts: self.traffic_signals[ts].compute_reward()
+    #             for ts in self.ts_ids
+    #             if self.traffic_signals[ts].time_to_act or self.fixed_ts
+    #         }
+    #     )
+    #     return {ts: self.rewards[ts] for ts in self.rewards.keys() if self.traffic_signals[ts].time_to_act or self.fixed_ts}
 
     @property
     def observation_space(self):
@@ -395,39 +401,39 @@ class SumoEnvironment(gym.Env):
         for ts in self.ts_ids:
             self.traffic_signals[ts].update_detectors_history()
 
-    def _get_system_info(self):
-        vehicles = self.sumo.vehicle.getIDList()
-        speeds = [self.sumo.vehicle.getSpeed(vehicle) for vehicle in vehicles]
-        waiting_times = [self.sumo.vehicle.getWaitingTime(vehicle) for vehicle in vehicles]
-        num_backlogged_vehicles = len(self.sumo.simulation.getPendingVehicles())
-        return {
-            "system_total_running": len(vehicles),
-            "system_total_backlogged": num_backlogged_vehicles,
-            "system_total_stopped": sum(
-                int(speed < 0.1) for speed in speeds
-            ),  # In SUMO, a vehicle is considered halting if its speed is below 0.1 m/s
-            "system_total_arrived": self.num_arrived_vehicles,
-            "system_total_departed": self.num_departed_vehicles,
-            "system_total_teleported": self.num_teleported_vehicles,
-            "system_total_waiting_time": sum(waiting_times),
-            "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
-            "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
-        }
+    # def _get_system_info(self):
+    #     vehicles = self.sumo.vehicle.getIDList()
+    #     speeds = [self.sumo.vehicle.getSpeed(vehicle) for vehicle in vehicles]
+    #     waiting_times = [self.sumo.vehicle.getWaitingTime(vehicle) for vehicle in vehicles]
+    #     num_backlogged_vehicles = len(self.sumo.simulation.getPendingVehicles())
+    #     return {
+    #         "system_total_running": len(vehicles),
+    #         "system_total_backlogged": num_backlogged_vehicles,
+    #         "system_total_stopped": sum(
+    #             int(speed < 0.1) for speed in speeds
+    #         ),  # In SUMO, a vehicle is considered halting if its speed is below 0.1 m/s
+    #         "system_total_arrived": self.num_arrived_vehicles,
+    #         "system_total_departed": self.num_departed_vehicles,
+    #         "system_total_teleported": self.num_teleported_vehicles,
+    #         "system_total_waiting_time": sum(waiting_times),
+    #         "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
+    #         "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
+    #     }
 
-    def _get_per_agent_info(self):
-        stopped = [self.traffic_signals[ts].get_total_queued() for ts in self.ts_ids]
-        accumulated_waiting_time = [
-            sum(self.traffic_signals[ts].get_accumulated_waiting_time_per_lane()) for ts in self.ts_ids
-        ]
-        average_speed = [self.traffic_signals[ts].get_average_speed() for ts in self.ts_ids]
-        info = {}
-        for i, ts in enumerate(self.ts_ids):
-            info[f"{ts}_stopped"] = stopped[i]
-            info[f"{ts}_accumulated_waiting_time"] = accumulated_waiting_time[i]
-            info[f"{ts}_average_speed"] = average_speed[i]
-        info["agents_total_stopped"] = sum(stopped)
-        info["agents_total_accumulated_waiting_time"] = sum(accumulated_waiting_time)
-        return info
+    # def _get_per_agent_info(self):
+    #     stopped = [self.traffic_signals[ts].get_total_queued() for ts in self.ts_ids]
+    #     accumulated_waiting_time = [
+    #         sum(self.traffic_signals[ts].get_accumulated_waiting_time_per_lane()) for ts in self.ts_ids
+    #     ]
+    #     average_speed = [self.traffic_signals[ts].get_average_speed() for ts in self.ts_ids]
+    #     info = {}
+    #     for i, ts in enumerate(self.ts_ids):
+    #         info[f"{ts}_stopped"] = stopped[i]
+    #         info[f"{ts}_accumulated_waiting_time"] = accumulated_waiting_time[i]
+    #         info[f"{ts}_average_speed"] = average_speed[i]
+    #     info["agents_total_stopped"] = sum(stopped)
+    #     info["agents_total_accumulated_waiting_time"] = sum(accumulated_waiting_time)
+    #     return info
 
     def close(self):
         """Close the environment and stop the simulation."""

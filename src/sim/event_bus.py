@@ -30,6 +30,7 @@ class EventBus:
     - "init": Simulator → Env (initialization complete)
     """
     
+    # File này định nghĩa các Ray actor chính cho hệ thống sự kiện
     def __init__(self):
         """Initialize event bus with empty subscriber lists."""
         # topic -> [(subscriber_id, actor_ref)]
@@ -139,4 +140,4 @@ class EventBus:
                 (sid, ref) for sid, ref in self.subscribers[topic]
                 if sid != subscriber_id
             ]
-            print(f"❌ EventBus: {subscriber_id} unsubscribed from '{topic}'")
+            print(f" EventBus: {subscriber_id} unsubscribed from '{topic}'")

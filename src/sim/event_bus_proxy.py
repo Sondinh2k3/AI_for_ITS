@@ -5,6 +5,8 @@ remote simulator through the EventBus. It enables the existing
 `SumoEnvironment` to interact with SUMO without direct API calls.
 """
 
+# Now, this file is not used to define any Ray actor. It simply defines a class that acts as a proxy to the simulator via the EventBus.
+
 from __future__ import annotations
 
 import time
@@ -210,6 +212,13 @@ class EventBusSimulatorProxy(SimulatorAPI):
         response = self._request("rgb_array_request", "rgb_array_result", required=False)
         if response and response.get("success", False):
             return response.get("frame")
+        return None
+
+    def get_state(self):
+        """Get the full state of the remote simulator (for debugging)."""
+        response = self._request("state_request", "state_result", required=False)
+        if response and response.get("success", False):
+            return response.get("state")
         return None
 
     # ------------------------------------------------------------------

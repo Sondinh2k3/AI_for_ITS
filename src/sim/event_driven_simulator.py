@@ -2,6 +2,8 @@
 
 This module wraps SumoSimulator to work with EventBus,
 enabling decoupled communication between Env and Simulator.
+
+Ray actor wrapper for SumoSimulator, receive/send messages via EventBus. And handles all SUMO-specific operations.
 """
 
 import ray
@@ -85,11 +87,11 @@ class EventDrivenSumoSimulator:
                 success=True
             )
             
-            print(f"✅ {self.simulator_id}: Initialized and published 'init'")
+            print(f" {self.simulator_id}: Initialized and published 'init'")
             return {"success": True, "observations": initial_obs}
             
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Initialization failed: {e}")
+            print(f" {self.simulator_id}: Initialization failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "init",
@@ -135,7 +137,7 @@ class EventDrivenSumoSimulator:
         elif topic == "attribute_update":
             self._handle_attribute_update(sender_id, **kwargs)
         else:
-            print(f"⚠️ {self.simulator_id}: Unknown topic '{topic}'")
+            print(f" {self.simulator_id}: Unknown topic '{topic}'")
     
     def _handle_action(self, sender_id: str, **kwargs):
         """Handle action message from Env.
@@ -145,7 +147,7 @@ class EventDrivenSumoSimulator:
             **kwargs: Should contain 'actions' dict
         """
         if not self.initialized:
-            print(f"⚠️ {self.simulator_id}: Received action before initialization")
+            print(f" {self.simulator_id}: Received action before initialization")
             return
 
         env_id = kwargs.get("env_id") or sender_id
@@ -182,10 +184,10 @@ class EventDrivenSumoSimulator:
                 success=True
             )
             
-            print(f"📤 {self.simulator_id}: Published step_result")
+            print(f" {self.simulator_id}: Published step_result")
             
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Step failed: {e}")
+            print(f" {self.simulator_id}: Step failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "step_result",
@@ -239,10 +241,10 @@ class EventDrivenSumoSimulator:
                 success=True
             )
             
-            print(f"🔄 {self.simulator_id}: Reset complete, published 'reset_result'")
+            print(f" {self.simulator_id}: Reset complete, published 'reset_result'")
             
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Reset failed: {e}")
+            print(f" {self.simulator_id}: Reset failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "reset_result",
@@ -273,10 +275,10 @@ class EventDrivenSumoSimulator:
                 success=True
             )
             
-            print(f"🛑 {self.simulator_id}: Closed successfully")
+            print(f" {self.simulator_id}: Closed successfully")
             
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Close failed: {e}")
+            print(f" {self.simulator_id}: Close failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "close_result",
@@ -308,7 +310,7 @@ class EventDrivenSumoSimulator:
                 success=True,
             )
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Init request failed: {e}")
+            print(f" {self.simulator_id}: Init request failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "init_result",
@@ -334,7 +336,7 @@ class EventDrivenSumoSimulator:
                 success=True,
             )
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Observation space request failed: {e}")
+            print(f" {self.simulator_id}: Observation space request failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "observation_space_result",
@@ -361,7 +363,7 @@ class EventDrivenSumoSimulator:
                 success=True,
             )
         except Exception as e:
-            print(f"❌ {self.simulator_id}: Action space request failed: {e}")
+            print(f" {self.simulator_id}: Action space request failed: {e}")
             self.bus.publish.remote(
                 self.simulator_id,
                 "action_space_result",
